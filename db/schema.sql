@@ -1,16 +1,16 @@
 -- ============================================================
--- 解梦知识库 · 建库语句（锁定版 2026-09-25）
+-- 解梦知识库 · 建库语句（锁定版 2026-09-25 + 2026-09-25 增补）
 -- 依据：inbox/数据库等_锁定版20260925.txt
--- 7 张表 + pg_trgm。字段与约束一字不改。
+-- 增补：新增 dream_subjects（IA 第二层：A–Z → Subject → Scene）
 -- ============================================================
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
--- 1. dream_topics（父主题表）
+-- 1. dream_topics（一级目录：A–Z，共 26 行）
 CREATE TABLE dream_topics (
     id          BIGSERIAL     PRIMARY KEY,
-    name        VARCHAR(80)   NOT NULL,
-    slug        VARCHAR(100)  NOT NULL UNIQUE,
+    name        VARCHAR(80)   NOT NULL,      -- A
+    slug        VARCHAR(100)  NOT NULL UNIQUE, -- a
     title       VARCHAR(150)  NOT NULL,
     description TEXT,
     status      SMALLINT      NOT NULL DEFAULT 1,
@@ -20,13 +20,30 @@ CREATE TABLE dream_topics (
 CREATE INDEX idx_dream_topics_name_lower ON dream_topics (LOWER(name));
 CREATE INDEX idx_dream_topics_status     ON dream_topics (status);
 
--- 2. dream_scenes（具体梦境页面主表）
+-- 2. dream_subjects（二级：主体，如 aardvark / apple / dog）★新增
+CREATE TABLE dream_subjects (
+    id          BIGSERIAL     PRIMARY KEY,
+    topic_id    BIGINT        NOT NULL REFERENCES dream_topics(id),
+    name        VARCHAR(80)   NOT NULL,      -- aardvark
+    slug        VARCHAR(100)  NOT NULL UNIQUE, -- aardvark  →  URL /aardvark
+    title       VARCHAR(150)  NOT NULL,
+    description TEXT,
+    status      SMALLINT      NOT NULL DEFAULT 1,
+    created_at  TIMESTAMP     NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMP     NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_dream_subjects_topic_id   ON dream_subjects (topic_id);
+CREATE INDEX idx_dream_subjects_name_lower ON dream_subjects (LOWER(name));
+CREATE INDEX idx_dream_subjects_status     ON dream_subjects (status);
+
+-- 3. dream_scenes（三级：具体梦境页面，最核心）
 CREATE TABLE dream_scenes (
     id              BIGSERIAL     PRIMARY KEY,
-    topic_id        BIGINT        NOT NULL REFERENCES dream_topics(id),
+    subject_id      BIGINT        NOT NULL REFERENCES dream_subjects(id),  -- ★新增：所属主体
+    topic_id        BIGINT        NOT NULL REFERENCES dream_topics(id),    -- 冗余（可由 subject 推出），保留兼容
     title           VARCHAR(180)  NOT NULL,
-    slug            VARCHAR(220)  NOT NULL,
-    full_path       VARCHAR(300)  NOT NULL UNIQUE,
+    slug            VARCHAR(220)  NOT NULL,                                -- 如 eat-apple
+    full_path       VARCHAR(300)  NOT NULL UNIQUE,                         -- 如 /apple/eat-apple
     main_object     VARCHAR(80)   NOT NULL,
     action          VARCHAR(80),
     target          VARCHAR(50),
@@ -46,6 +63,7 @@ CREATE TABLE dream_scenes (
     created_at      TIMESTAMP     NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMP     NOT NULL DEFAULT NOW()
 );
+CREATE INDEX idx_dream_scenes_subject_id      ON dream_scenes (subject_id);
 CREATE INDEX idx_dream_scenes_topic_id        ON dream_scenes (topic_id);
 CREATE INDEX idx_dream_scenes_main_object     ON dream_scenes (main_object);
 CREATE INDEX idx_dream_scenes_action          ON dream_scenes (action);
@@ -55,7 +73,7 @@ CREATE INDEX idx_dream_scenes_location        ON dream_scenes (location);
 CREATE INDEX idx_dream_scenes_context         ON dream_scenes (context);
 CREATE INDEX idx_dream_scenes_title_trgm      ON dream_scenes USING GIN (LOWER(title) gin_trgm_ops);
 
--- 3. dream_scene_aliases（搜索别名表）
+-- 4. dream_scene_aliases（搜索别名表）
 CREATE TABLE dream_scene_aliases (
     id               BIGSERIAL   PRIMARY KEY,
     scene_id         BIGINT      NOT NULL REFERENCES dream_scenes(id) ON DELETE CASCADE,
@@ -71,7 +89,7 @@ CREATE INDEX idx_alias_normalized    ON dream_scene_aliases (alias_normalized);
 CREATE INDEX idx_alias_status        ON dream_scene_aliases (status);
 CREATE INDEX idx_alias_norm_trgm     ON dream_scene_aliases USING GIN (alias_normalized gin_trgm_ops);
 
--- 4. search_terms（搜索词归一库）
+-- 5. search_terms（搜索词归一库）
 CREATE TABLE search_terms (
     id              BIGSERIAL   PRIMARY KEY,
     variant_text    TEXT        NOT NULL,
@@ -86,7 +104,7 @@ CREATE TABLE search_terms (
 CREATE INDEX idx_search_terms_normalized ON search_terms (normalized_text);
 CREATE INDEX idx_search_terms_field_val  ON search_terms (field_type, canonical_value);
 
--- 5. dream_nearby（相关梦境关系）
+-- 6. dream_nearby（相关梦境关系）
 CREATE TABLE dream_nearby (
     id              BIGSERIAL PRIMARY KEY,
     scene_id        BIGINT    NOT NULL REFERENCES dream_scenes(id) ON DELETE CASCADE,
@@ -96,7 +114,7 @@ CREATE TABLE dream_nearby (
 );
 CREATE INDEX idx_dream_nearby_scene_id ON dream_nearby (scene_id);
 
--- 6. search_logs（搜索日志）
+-- 7. search_logs（搜索日志）
 CREATE TABLE search_logs (
     id                 BIGSERIAL   PRIMARY KEY,
     query_text         TEXT        NOT NULL,
@@ -113,7 +131,7 @@ CREATE INDEX idx_search_logs_created    ON search_logs (created_at);
 CREATE INDEX idx_search_logs_clicked    ON search_logs (clicked_page_id);
 CREATE INDEX idx_search_logs_intent     ON search_logs (intent_type);
 
--- 7. dream_submissions（用户提交梦境）
+-- 8. dream_submissions（用户提交梦境）
 CREATE TABLE dream_submissions (
     id                 BIGSERIAL    PRIMARY KEY,
     dream_text         TEXT         NOT NULL,
