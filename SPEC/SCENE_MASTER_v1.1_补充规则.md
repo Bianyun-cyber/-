@@ -165,3 +165,14 @@ Terms: ...
 {raw_text}
 """
 ```
+---
+
+## 补充 L｜2026-09-25 22:32 冻结项
+
+1. **`context` 允许为空**。不为填字段而硬抽；核心先做准 `subject / scene / H1 / slug / terms`。以后搜索或页面生成确实需要再补一轮。
+2. **"字母本身"词条**（原文词条就是 A / B / C…）→ **subject = 该字母**（`a` / `b` / `c`…），letter = 大写同一字母。
+   - 例：`source: A` → `subject: a`，`letter: A` → `/a/...`
+   - **禁止**写 `letter-a`（会把 "Letter" 人为塞进主体）。
+3. **速度**：**每条都过 glm-5.3**，不做抽检。这是生产母数据，最怕的不是慢，是把错批量灌库后返工。
+   - `temperature = 0` + 每条校验 + 断点续跑，这套保持。
+4. **重申**：泛化主体梦境（如 `To see an aardvark…`）**也要产出独立 scene**（`/aardvark/dream-about-aardvark`）；H1 是否叫 `Dream About Aardvark` 由语义生成决定，不是固定模板。
