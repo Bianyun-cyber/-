@@ -32,3 +32,28 @@ glm-5.3 判不合规、自动修复也没救回来的。**05 跑完后跑一轮�
 - **07 AuntyFlo**：待跑，**按内容语义合并去重**（不是只比名字）；命中记 `merge_log.csv`。
 - 05 跑完后：`finalize.py`（分配 id）→ `dedupe.py`（清重复）→ `qa.py`（全量质检）。
 - 日志已按天归档到 `logs/archive/`（避免再被覆盖）。
+
+---
+
+## 5. 闭环验收状态（2026-09-26 12:05，用户明确）
+
+**⚠️ 现在还没有验收通过。** 只有等 05 全部结束、停写后，按顺序跑一遍才算。
+
+**严禁**：在 05 没跑完时，把当前 `dream_scenes.id` 当最终 ID 去建 terms 关系。
+
+### 执行顺序（05 跑完后）
+```
+停写 → finalize.py → build_scene_terms.py → TRUNCATE + INSERT → acceptance.py
+```
+
+### ③ 的通过标准（严格）
+库里必须**真实存在**这 3 个页面，并且实际跑出 6 / 4 / 3：
+```
+Huge Black Dog Chases You in House   terms= huge,black,dog,chase,you,house  → 6
+Black Dog Chases You                 terms= black,dog,chase,you            → 4
+Dog Chases You                       terms= dog,chase,you                  → 3
+```
+**"机制通"不算通过**，必须拿到真实的 6/4/3。
+
+### 最终要看的（整条闭环，不是脚本跑没跑成功）
+**9 张表 + Scene 数据 + terms + 搜索归一化 + 无命中提交** 能否**从头跑到尾**形成一个闭环。
