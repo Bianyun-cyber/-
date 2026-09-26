@@ -23,7 +23,7 @@ M_EXTRACT = 'deepseek-v4.1-flash'
 M_CHECK   = 'glm-5.3'
 
 FIELDS = ['main_object','action','target','color','location','size_modifier','other_modifier','context']
-LOCK = threading.Lock()
+LOCK = threading.RLock()   # 可重入，避免 with LOCK 内再调 append_csv 死锁
 
 SYS_EXTRACT = """你是一个梦境场景抽取助手。严格按下面规则工作，不要发挥。
 
@@ -40,10 +40,12 @@ SYS_EXTRACT = """你是一个梦境场景抽取助手。严格按下面规则工
      **禁止用 you / person / someone / something / others / thing / object 当 subject。**
      身体部位/从属物归主体；独立物体才独立；角色/身份类归主体。
    - 以下 8 个搜索字段，**填不出就写 null**（不要编）：
-     main_object（梦见的东西，必填，= Subject）、action（做了什么，动词原形）、
+     main_object（梦见的东西，**必须与 Subject 完全一致**）、action（做了什么，动词原形）、
      target（对谁；**只要梦里有"你"参与，就必须填 you**）、color（颜色）、
      location（地点/身体部位）、size_modifier（大小形态）、other_modifier（其它限定）、
      context（情境，如 sleeping）。
+   - **h1 里出现的动作词必须落到 action**：
+     如 h1 写 "Seeing X in a Dream" → action=see；"Eating X in a Dream" → action=eat；"Wearing X" → action=wear。
    - 所有字段一律：小写、单数、动词原形（bite 不写 bites/biting；dog 不写 dogs）；
      复合修饰不拆（two-headed）；**字段里不能有空格**（多词用连字符，如 in ruins → in-ruins）。
 
@@ -164,9 +166,35 @@ def norm_val(v):
     v=re.sub(r"\s+","-",v); v=re.sub(r"-+","-",v).strip('-')
     return v or None
 
+def _rec_from_dict(d):
+    def g(*ks):
+        for k in ks:
+            if k in d: return d[k]
+        return None
+    h1=g('h1','H1','title'); sub=g('subject','Subject')
+    if not h1 or not sub: return None
+    subn=norm_val(sub) or str(sub).strip().lower()
+    r={'h1':str(h1).strip(),'subject':subn}
+    for f in FIELDS:
+        r[f]=norm_val(g(f, f.replace('_',' '), f.title()))
+    r['main_object']=subn
+    return r
+
 def parse_blocks(text):
+    t=(text or '').strip()
+    # ① 先试 JSON（模型有时回 JSON）
+    for a,b in (('[',']'),('{','}')):
+        i=t.find(a); j=t.rfind(b)
+        if i!=-1 and j>i:
+            try:
+                o=json.loads(t[i:j+1])
+                objs=o if isinstance(o,list) else [o]
+                rs=[x for x in (_rec_from_dict(y) for y in objs if isinstance(y,dict)) if x]
+                if rs: return rs
+            except Exception: pass
+    # ② 行格式 H1:/Subject:/...
     out=[]
-    for blk in re.split(r'\n\s*\n', text):
+    for blk in re.split(r'\n\s*\n', t):
         rec={}
         for line in blk.splitlines():
             m=re.match(r'\s*([A-Za-z0-9 ]+?)\s*[:：]\s*(.*)', line)
@@ -174,9 +202,10 @@ def parse_blocks(text):
             rec[m.group(1).strip().lower().replace(' ','_')]=m.group(2).strip()
         h1=rec.get('h1'); sub=rec.get('subject')
         if not h1 or not sub: continue
-        r={'h1':h1,'subject':sub.lower()}
+        subn=norm_val(sub) or sub.strip().lower()
+        r={'h1':h1,'subject':subn}
         for f in FIELDS: r[f]=norm_val(rec.get(f))
-        if not r['main_object']: r['main_object']=r['subject']
+        r['main_object']=subn   # 强制与 subject 一致
         out.append(r)
     return out
 
@@ -196,35 +225,81 @@ def append_csv(path, header, rows):
             if new: w.writerow(header)
             w.writerows(rows)
 
+def verify(row):
+    """返回 (是否通过, 错误文本)"""
+    msg=json.dumps(row,ensure_ascii=False)
+    try:
+        chk=call(M_CHECK,SYS_CHECK,msg,max_tokens=100000)
+        if '"ok"' not in chk.replace(' ','').lower():
+            chk=call(M_CHECK,SYS_CHECK,msg,max_tokens=100000)
+    except Exception as ex:
+        return None, str(ex)
+    return ('"ok":true' in chk.replace(' ','').lower()), chk
+
+REPAIR_SYS = """你是梦境场景修正员。下面一条抽取结果被校验员拒了。
+请**只重出这一条**（同样格式），修正指出的问题。不要增加或减少场景。
+格式：H1 / Subject / Main Object / Action / Target / Color / Location / Size Modifier / Other Modifier / Context（填不出写 null）。
+只输出这一条的字段，不要多余文字。"""
+
+def build_row(s, eterm):
+    sub=s['subject']; sslug=slugify(sub); ss=slugify(s['h1'])
+    row=dict(s); row['subject_slug']=sslug; row['letter']=sub[:1].upper()
+    row['slug']=ss; row['full_path']=f"/{sslug}/{ss}"; row['terms']=derive_terms(s)
+    return row
+
 def process_entry(e, stats):
     raw="\n".join(p['text'] for p in e['paras'])
-    scenes=parse_blocks(call(M_EXTRACT,SYS_EXTRACT,raw))
+    out=call(M_EXTRACT,SYS_EXTRACT,raw,max_tokens=100000)
+    scenes=parse_blocks(out)
+    # 抽空（模型把 token 烧在思考上 / 返回空）→ 不标记完成，稍后重跑
+    if not scenes:
+        with LOCK:
+            print(f"   ⚠ 抽空(模型无输出) 不标记完成: {e['term']}", flush=True)
+            stats['empty']+=1
+        return e['term'], [], False
     # 结构规则（机械，不是判断）：字母本身的词条 → subject = 该字母（用户 2026-09-25 冻结）
-    if re.fullmatch(r'[A-Za-z]', e['term'].strip()):
+    is_letter = bool(re.fullmatch(r'[A-Za-z]', e['term'].strip()))
+    if is_letter:
         L=e['term'].strip().lower()
         for s in scenes:
             s['subject']=L; s['main_object']=L
     good=[]
     for s in scenes:
-        sub=s['subject']; sslug=slugify(sub); ss=slugify(s['h1'])
-        row=dict(s); row['subject_slug']=sslug; row['letter']=sub[:1].upper()
-        row['slug']=ss; row['full_path']=f"/{sslug}/{ss}"; row['terms']=derive_terms(s)
-        try:
-            chk=call(M_CHECK,SYS_CHECK,json.dumps(row,ensure_ascii=False),max_tokens=8000)
-            if '"ok"' not in chk.replace(' ','').lower():
-                chk=call(M_CHECK,SYS_CHECK,json.dumps(row,ensure_ascii=False),max_tokens=12000)
-        except Exception as ex:
-            with LOCK: print(f"   ✖ 校验失败 {ss}: {ex}", flush=True)
-            with LOCK: stats['failed']+=1
+        row=build_row(s, e['term'])
+        passed, msg = verify(row)
+        # 未过 → 把错误喂回模型，让它改（最多再试 1 次）
+        for _ in range(1):
+            if passed is not False: break
+            try:
+                fix=call(M_EXTRACT,REPAIR_SYS,
+                    f"被拒结果：\n{json.dumps(row,ensure_ascii=False)}\n\n拒绝原因：\n{msg}\n\n原文：\n{raw}",
+                    max_tokens=100000)
+                fx=parse_blocks(fix)
+            except Exception:
+                fx=[]
+            if not fx: break
+            s2=fx[0]
+            if is_letter: s2['subject']=s['subject']; s2['main_object']=s['subject']
+            elif not s2.get('subject'): s2['subject']=s['subject']; s2['main_object']=s['subject']
+            row=build_row(s2, e['term'])
+            passed, msg = verify(row)
+            if passed: 
+                with LOCK: print(f"   🔧 修复成功 {row['slug']}", flush=True)
+                break
+        if passed is None:
+            with LOCK: print(f"   ✖ 校验失败 {row['slug']}: {msg}", flush=True); stats['failed']+=1
             continue
-        if '"ok":true' not in chk.replace(' ','').lower():
+        if not passed:
             with LOCK:
-                print(f"   ⛔ 未过 {ss}:",chk.replace(chr(10),' ')[:200], flush=True)
+                print(f"   ⛔ 未过 {row['slug']}:",str(msg).replace(chr(10),' ')[:200], flush=True)
                 stats['rejected']+=1
+                append_csv(os.path.join(DB,'rejected.csv'),
+                    ['source','term','h1','full_path','reason'],
+                    [[ '05 DreamMoods', e['term'], row['h1'], row['full_path'], str(msg)[:400] ]])
             continue
-        with LOCK: print(f"   ✓ {ss}", flush=True)
+        with LOCK: print(f"   ✓ {row['slug']}", flush=True)
         good.append(row)
-    return e['term'], good
+    return e['term'], good, True
 
 def main():
     ap=argparse.ArgumentParser()
@@ -243,17 +318,25 @@ def main():
         with open(sp,encoding='utf-8-sig') as f:
             for r in list(csv.reader(f))[1:]:
                 if len(r)>3: seen.add(r[3])
-    stats={'entries':0,'scenes':0,'rejected':0,'failed':0}
+    seen_paths=set()
+    scp=os.path.join(DB,'dream_scenes.csv')
+    if os.path.exists(scp):
+        with open(scp,encoding='utf-8-sig') as f:
+            for r in csv.DictReader(f): seen_paths.add(r['full_path'])
+    stats={'entries':0,'scenes':0,'rejected':0,'failed':0,'empty':0}
     print(f"待处理 {len(sel)} 词条，{a.workers} 并发", flush=True)
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
         futs={ex.submit(process_entry,e,stats):e for e in sel}
         for fu in as_completed(futs):
-            e=futs[fu]; term=futs[fu]['term'] if False else e['term']
-            try: term, good = fu.result()
+            e=futs[fu]
+            try: term, good, ok = fu.result()
             except Exception as ex2:
                 print(f"   ✖ 词条失败 {e['term']}: {ex2}", flush=True); stats['failed']+=1; continue
             if a.write:
                 for row in good:
+                    if row['full_path'] in seen_paths:
+                        print(f"   ↺ 已存在，跳过 {row['full_path']}", flush=True); continue
+                    seen_paths.add(row['full_path'])
                     sslug=row['subject_slug']
                     if sslug not in seen:
                         seen.add(sslug)
@@ -265,9 +348,10 @@ def main():
                          + [row[f] or '' for f in FIELDS] + [0]])
                     append_csv(os.path.join(DB,'scene_terms.csv'),
                         ['full_path','terms'], [[ row['full_path'], row['terms'] ]])
+            if ok:
                 done.add(term); stats['entries']+=1
                 stats['scenes']+=len(good)
-                json.dump(sorted(done),open(prog_path,'w'),ensure_ascii=False)
+                if a.write: json.dump(sorted(done),open(prog_path,'w'),ensure_ascii=False)
             print(f"   └ [{stats['entries']}/{len(sel)}] {term}  (scenes={stats['scenes']})", flush=True)
     print("="*70); print("完成:",stats, flush=True)
 
