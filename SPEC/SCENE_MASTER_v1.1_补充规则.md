@@ -176,3 +176,49 @@ Terms: ...
 3. **速度**：**每条都过 glm-5.3**，不做抽检。这是生产母数据，最怕的不是慢，是把错批量灌库后返工。
    - `temperature = 0` + 每条校验 + 断点续跑，这套保持。
 4. **重申**：泛化主体梦境（如 `To see an aardvark…`）**也要产出独立 scene**（`/aardvark/dream-about-aardvark`）；H1 是否叫 `Dream About Aardvark` 由语义生成决定，不是固定模板。
+
+---
+
+## 补充 M｜`dream_scene_terms`（2026-09-26 冻结）
+
+**定位**：把已冻结的搜索规则（词命中 +1）真正落地的那一环。**只补这一环，不动 dream_scenes / subject / H1。**
+
+```sql
+CREATE TABLE dream_scene_terms (
+    scene_id BIGINT      NOT NULL REFERENCES dream_scenes(id) ON DELETE CASCADE,
+    term     VARCHAR(60) NOT NULL,
+    PRIMARY KEY (scene_id, term)
+);
+-- 反向查询（给一个词 → 找所有含此词的 scene）必须有这个索引，否则全表扫描
+CREATE INDEX idx_scene_terms_term ON dream_scene_terms (term, scene_id);
+```
+
+### 冻结规则（10 条）
+1. **不加 `id`**：`(scene_id, term)` 就是主键。
+2. **不把 terms 塞进 `dream_scenes`**：CSV 可以留作生产中间文件，库里必须拆表。
+3. **数据库是线上唯一真源**；`scene_terms.csv` 是**纯派生数据**，可随时删除重建。
+4. **导入用 `full_path` 对接**：`scene_terms.csv → dream_scenes.full_path → dream_scenes.id`。
+5. **每次 finalize 后全量重建**：`TRUNCATE → 按 full_path 重新 JOIN → INSERT`，**不做增量 upsert**。
+6. **永远只放英文标准词**；中文、同义说法、用户变体全部交给 `search_terms` / `dream_scene_aliases`。
+7. **与 `dream_scene_aliases` 职责分开**：
+
+   | 表 | 含义 | 来源 |
+   |---|---|---|
+   | `dream_scene_terms` | 页面**自身的标准身份词** | 自动抽取 |
+   | `dream_scene_aliases` | **用户可能使用的其他表达** | 人工确认 |
+
+   **禁止把用户查询词灌进 terms**（一旦混入，terms 就失去"场景身份"含义，去重与质检全部失效）。
+8. **不加 `weight`**：当前规则就是 flat `+1`；将来要加权在 **SQL 查询层**做，不污染生产母数据。
+9. **闭环验收四项**（`scripts/acceptance.py`）：
+   - published scene 有 term，且必含 subject
+   - term 可反查 scene
+   - 固定测试句 `I dreamed a huge black dog chased me in my house` 得 `6 / 4 / 3`，同分并列
+   - 0 命中 → 进 `dream_submissions`，**不伪造结果**
+10. **命名统一**：原 Scene Master v1.1 第六节的 `page_terms` → 统一为 **`dream_scene_terms`**（与 `dream_scenes` / `dream_scene_aliases` 同前缀）。
+
+### 执行顺序（必须遵守）
+```
+停写 → finalize.py（分配/重排 id）→ build_scene_terms.py（全量重建 dream_scene_terms.csv）
+     → 导入（TRUNCATE + INSERT）→ acceptance.py 验收
+```
+**注意**：`finalize.py` 会重排 id，所以 terms **必须在 finalize 之后**重建；跑批中并发重建会错位。
