@@ -54,11 +54,28 @@ rep("⑤ scene.subject_id 连不上 subject", [x['full_path'] for x in C if x['s
 paths={x['full_path'] for x in C}; tpaths={x['full_path'] for x in T}
 rep("⑥ scene 没有对应 terms", sorted(paths-tpaths)[:10])
 rep("⑥b 孤立 terms（没有对应 scene）", sorted(tpaths-paths)[:10])
-# ⑦ 日志
-lf=os.path.join(LOG,f"extract_{L}.log")
-if os.path.exists(lf):
-    txt=open(lf,encoding='utf-8',errors='ignore').read()
+# ⑦ 日志（优先读链条日志 run_05_all.log，按字母切片）
+import glob
+sections={}
+chain=os.path.join(LOG,'run_05_all.log')
+if os.path.exists(chain):
+    cur=None
+    for line in open(chain,encoding='utf-8',errors='ignore'):
+        m=re.match(r'#+\s*05 字母\s*([A-Za-z])', line)
+        if m: cur=m.group(1).lower(); sections[cur]=[]
+        elif cur: sections[cur].append(line)
+txt="".join(sections.get(L,[]))
+if not txt:
+    lf=os.path.join(LOG,f"extract_{L}.log")
+    if os.path.exists(lf): txt=open(lf,encoding='utf-8',errors='ignore').read()
+if txt:
     rej=[l.strip() for l in txt.splitlines() if '⛔' in l]
     fail=[l.strip() for l in txt.splitlines() if '✖' in l]
+    fix=[l.strip() for l in txt.splitlines() if '🔧' in l]
+    empty=[l.strip() for l in txt.splitlines() if '抽空' in l]
     rep("⑦ 被 glm-5.3 打回（需人工看）", rej, 20)
     rep("⑦b 抽取/校验失败（502 等，要补跑）", fail, 20)
+    rep("⑦c 自动修复成功（原本会被打回）", fix, 20)
+    rep("⑦d 抽空（不标记完成，会重跑）", empty, 20)
+else:
+    print("\n[⑦] 没找到日志")
